@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net"
@@ -13,18 +14,27 @@ const (
 	OscarSig         = 0x2a
 )
 
+var oscarHello = []byte{0x2a, 0x01, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01}
+
 func handleConn(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	clientConn.SetDeadline(time.Now().Add(2 * time.Second))
-	buffer := make([]byte, 1)
-	_, err := io.ReadFull(clientConn, buffer)
-	if err != nil || buffer[0] != OscarSig {
-		log.Printf("Non-OSCAR incoming connection=%v. Refuse it!", clientConn.RemoteAddr())
+	clientConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	_, err := clientConn.Write(oscarHello)
+	if err != nil {
 		return
 	}
 
-	clientConn.SetReadDeadline(time.Time{})
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	buffer := make([]byte, 1)
+	_, err = io.ReadFull(clientConn, buffer)
+	if err != nil || buffer[0] != OscarSig {
+		log.Printf("Non-OSCAR incoming connection=%v. Data=%v", clientConn.RemoteAddr(), buffer)
+		return
+	}
+
+	clientConn.SetDeadline(time.Time{})
 
 	backendConn, err := net.DialTimeout("tcp", OscarBackendAddr, 5*time.Second)
 	if err != nil {
@@ -33,17 +43,25 @@ func handleConn(clientConn net.Conn) {
 	}
 	defer backendConn.Close()
 
-	backendConn.Write(buffer)
+	log.Printf("Initial connection... ip=%v", clientConn.RemoteAddr())
+
+	clientStream := io.MultiReader(bytes.NewReader(buffer), clientConn)
 
 	done := make(chan bool, 2)
 
 	go func() {
-		io.Copy(backendConn, clientConn)
+		_, err := io.Copy(backendConn, clientStream)
+		if err != nil {
+			log.Printf("Copy to backend error: %v", err)
+		}
 		done <- true
 	}()
 
 	go func() {
-		io.Copy(clientConn, backendConn)
+		_, err := io.Copy(clientConn, backendConn)
+		if err != nil {
+			log.Printf("Copy to client error: %v", err)
+		}
 		done <- true
 	}()
 
